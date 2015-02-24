@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package vcs // import "golang.org/x/tools/go/vcs"
+package vcs
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+    "bufio"
 )
 
 // Verbose enables verbose operation logging.
@@ -42,6 +43,7 @@ type Cmd struct {
 
 	Scheme  []string
 	PingCmd string
+    IsRepoRoot func(string) (bool, error)
 }
 
 // A TagCmd describes a command to list available tags
@@ -70,6 +72,11 @@ func ByCmd(cmd string) *Cmd {
 	return nil
 }
 
+var defaultIsRepoRoot = func(vcsDirPath string)(bool, error ){
+    fi, err := os.Stat(vcsDirPath)
+    return err == nil && fi.IsDir(), err
+}
+
 // vcsHg describes how to use Mercurial.
 var vcsHg = &Cmd{
 	Name: "Mercurial",
@@ -94,6 +101,7 @@ var vcsHg = &Cmd{
 
 	Scheme:  []string{"https", "http", "ssh"},
 	PingCmd: "identify {scheme}://{repo}",
+    IsRepoRoot: defaultIsRepoRoot,
 }
 
 // vcsGit describes how to use Git.
@@ -117,6 +125,35 @@ var vcsGit = &Cmd{
 
 	Scheme:  []string{"git", "https", "http", "git+ssh"},
 	PingCmd: "ls-remote {scheme}://{repo}",
+    IsRepoRoot: func(gitFileOrDirPath string) (bool, error) {
+        isNonSubmoduleRepoRoot, err := defaultIsRepoRoot(gitFileOrDirPath)
+        if err != nil {
+            return false, err
+        } else if isNonSubmoduleRepoRoot {
+            return true, nil
+        }
+
+        f, err := os.Open(gitFileOrDirPath)
+        defer f.Close()
+
+        if err != nil{
+            return false, errors.New("error opening .git file")
+        }
+
+        reader := bufio.NewReader(f)
+        line, err := reader.ReadString('\n')
+        if err != nil {
+            return false, errors.New("error reading .git file")
+        }
+
+        gitRepoPathRegexp := regexp.MustCompile(`gitdir: ((?:\.\./)*)\.git/modules/.*`)
+        matches := gitRepoPathRegexp.FindStringSubmatch(line)
+        if len(matches) != 2{
+            return false, errors.New("bad .git submodule file!")
+        }
+
+        return true, nil
+    },
 }
 
 // vcsBzr describes how to use Bazaar.
@@ -136,6 +173,7 @@ var vcsBzr = &Cmd{
 
 	Scheme:  []string{"https", "http", "bzr", "bzr+ssh"},
 	PingCmd: "info {scheme}://{repo}",
+    IsRepoRoot: defaultIsRepoRoot,
 }
 
 // vcsSvn describes how to use Subversion.
@@ -153,6 +191,7 @@ var vcsSvn = &Cmd{
 
 	Scheme:  []string{"https", "http", "svn", "svn+ssh"},
 	PingCmd: "info {scheme}://{repo}",
+    IsRepoRoot: defaultIsRepoRoot,
 }
 
 func (v *Cmd) String() string {
@@ -347,7 +386,7 @@ func FromDir(dir, srcRoot string) (vcs *Cmd, root string, err error) {
 
 	for len(dir) > len(srcRoot) {
 		for _, vcs := range vcsList {
-			if fi, err := os.Stat(filepath.Join(dir, "."+vcs.Cmd)); err == nil && fi.IsDir() {
+			if isRepoRoot, err := vcs.IsRepoRoot(filepath.Join(dir, "."+vcs.Cmd)); err == nil && isRepoRoot {
 				return vcs, dir[len(srcRoot)+1:], nil
 			}
 		}
